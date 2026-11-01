@@ -186,9 +186,16 @@ app.post('/session/action', async (c) => {
       result = await session.controller.fill(params.selector, params.text || '');
     } else if (action === 'submit') {
       result = await session.controller.submit(params.selector);
+    } else if (action === 'scroll') {
+      result = await session.controller.scroll(params.direction || 'down', params.amount || 600);
+    } else if (action === 'scroll_to_element') {
+      result = await session.controller.scrollToElement(params.selector);
     } else if (action === 'inject_chaos') {
-      await session.controller.injectChaos(params.type, params);
+      await session.controller.injectChaos(params.type || 'status_code', params);
       result = { action: 'inject_chaos', success: true };
+    } else if (action === 'clear_chaos') {
+      await session.controller.clearChaos();
+      result = { action: 'clear_chaos', success: true };
     } else if (action === 'wait_for') {
       const found = await session.controller.waitForSelector(params.selector, params.timeoutMs);
       result = { action: 'wait_for', selector: params.selector, success: found };

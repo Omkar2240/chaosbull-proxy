@@ -356,11 +356,6 @@ export class PlaywrightBrowserController {
         value: text,
         success: false,
         durationMs: Date.now() - start,
-        action: 'fill',
-        selector,
-        value: text,
-        success: false,
-        durationMs: Date.now() - start,
         error: msg,
       };
     }
@@ -399,7 +394,84 @@ export class PlaywrightBrowserController {
     }
   }
 
-  async injectChaos(type: 'status_code' | 'latency' | 'block' | 'abort', params: any): Promise<void> {
+  /**
+   * Scrolls the page viewport smoothly in the specified direction.
+   */
+  async scroll(direction: 'down' | 'up' | 'bottom' | 'top' = 'down', amount = 600): Promise<BrowserActionSummary> {
+    this.ensureReady();
+    const start = Date.now();
+    try {
+      if (direction === 'bottom') {
+        await this.page!.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
+      } else if (direction === 'top') {
+        await this.page!.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      } else if (direction === 'up') {
+        await this.page!.evaluate((amt) => window.scrollBy({ top: -amt, behavior: 'smooth' }), amount);
+      } else {
+        await this.page!.evaluate((amt) => window.scrollBy({ top: amt, behavior: 'smooth' }), amount);
+      }
+      await this.page!.waitForTimeout(800);
+
+      return {
+        action: 'scroll',
+        value: `${direction} ${amount}px`,
+        success: true,
+        durationMs: Date.now() - start,
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        action: 'scroll',
+        value: direction,
+        success: false,
+        durationMs: Date.now() - start,
+        error: msg,
+      };
+    }
+  }
+
+  /**
+   * Scrolls target selector into the center of the viewport.
+   */
+  async scrollToElement(selector: string): Promise<BrowserActionSummary> {
+    this.ensureReady();
+    const start = Date.now();
+    try {
+      let locator = this.page!.locator(selector).first();
+      let count = await locator.count().catch(() => 0);
+      if (count === 0) {
+        locator = this.page!.locator(`text="${selector}"`).first();
+        count = await locator.count().catch(() => 0);
+      }
+      if (count > 0) {
+        await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+        await this.highlightElement(selector, '#3B82F6');
+      } else {
+        await this.page!.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, selector);
+      }
+      await this.page!.waitForTimeout(600);
+      return {
+        action: 'scroll_to_element',
+        selector,
+        success: true,
+        durationMs: Date.now() - start,
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        action: 'scroll_to_element',
+        selector,
+        success: false,
+        durationMs: Date.now() - start,
+        error: msg,
+      };
+    }
+  }
+
+  async injectChaos(type: 'status_code' | 'latency' | 'block' | 'abort' | 'corrupt' | 'network_drop', params: any): Promise<void> {
     this.ensureReady();
     const pattern = params.pattern || '**/api/**';
 
@@ -422,11 +494,29 @@ export class PlaywrightBrowserController {
       await this.page!.route(pattern, async (route) => {
         await route.abort('blockedbyclient');
       });
-    } else if (type === 'abort') {
+    } else if (type === 'abort' || type === 'network_drop') {
       await this.page!.route(pattern, async (route) => {
         await route.abort('failed');
       });
+    } else if (type === 'corrupt') {
+      await this.page!.route(pattern, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: '<<CORRUPTED_JSON_RESPONSE:ERR_BAD_PAYLOAD_CHAOSBULL>>',
+        });
+      });
     }
+  }
+
+  /**
+   * Clears all simulated chaos network rules to restore normal operation.
+   */
+  async clearChaos(): Promise<void> {
+    if (!this.page) return;
+    try {
+      await this.page.unrouteAll({ behavior: 'wait' }).catch(() => {});
+    } catch {}
   }
 
   async waitForSelector(selector: string, timeoutMs = 5000): Promise<boolean> {

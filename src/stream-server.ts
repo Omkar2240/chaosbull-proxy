@@ -31,7 +31,7 @@ export function setupStreamWebSocketServer(httpServer: HttpServer, secretToken: 
     }
   });
 
-  wss.on('connection', async (ws: WebSocket, _request, { runId, userId }: { runId: string; userId: string }) => {
+  wss.on('connection', async (ws: WebSocket, _request: any, { runId, userId }: { runId: string; userId: string }) => {
     console.log(`[StreamServer] WebSocket client connected for runId: ${runId} (userId: ${userId})`);
     await BrowserSessionManager.addSubscriber(runId, ws);
 
