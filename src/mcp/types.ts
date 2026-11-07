@@ -104,3 +104,4 @@ export interface ScreenshotResult {
   };
   load_time_ms: number;
 }
+

@@ -18,3 +18,4 @@ ENV CHAOSBULL_ALLOW_LOCAL=false
 EXPOSE 3005
 
 CMD ["npm", "start"]
+
