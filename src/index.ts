@@ -2,9 +2,9 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { randomUUID } from 'node:crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { createChaosBullServer, closeBrowser } from '../../../playwright-network-chaos-mcp/dist/index.js';
+import { createChaosBullServer, closeBrowser } from './mcp/index.js';
 import { validateTargetUrl, SSRFSecurityError } from './ssrf.js';
-import { BrowserSessionManager, generateStreamTicket } from './session-manager.js';
+import { BrowserSessionManager, generateStreamTicket, MAX_CONCURRENT_SESSIONS } from './session-manager.js';
 import { setupStreamWebSocketServer } from './stream-server.js';
 import { config } from 'dotenv';
 
@@ -88,6 +88,7 @@ app.use('/session', authenticateMcp);
 
 /**
  * Start or retrieve an isolated browser session for a test run.
+ * Concurrency-aware: queues requests in FIFO order if max concurrent limit is reached.
  */
 app.post('/session/start', async (c) => {
   try {
@@ -105,18 +106,40 @@ app.post('/session/start', async (c) => {
     // SSRF Validation
     await validateTargetUrl(targetUrl, ALLOW_LOCAL);
 
-    const session = await BrowserSessionManager.getOrCreateSession(runId, userId, targetUrl);
+    const startResult = await BrowserSessionManager.requestOrCreateSession(runId, userId, targetUrl);
     const ticket = generateStreamTicket(runId, userId, MCP_AUTH_TOKEN);
 
-    console.log(`[Proxy] /session/start: Session ready (id=${session.id}, status=${session.status})`);
+    if (startResult.isQueued) {
+      console.log(
+        `[Proxy] /session/start: Session queued (runId=${runId}, position=${startResult.queuePosition}, total=${startResult.totalQueued})`
+      );
+      return c.json({
+        success: true,
+        runId,
+        status: 'queued',
+        isQueued: true,
+        queuePosition: startResult.queuePosition,
+        totalQueued: startResult.totalQueued,
+        estimatedWaitSec: startResult.estimatedWaitSec,
+        ticket,
+        url: targetUrl,
+        title: 'In Concurrency Queue',
+      });
+    }
+
+    console.log(`[Proxy] /session/start: Session ready (id=${startResult.session!.id}, status=${startResult.session!.status})`);
 
     return c.json({
       success: true,
-      runId: session.id,
-      status: session.status,
+      runId: startResult.session!.id,
+      status: startResult.session!.status,
+      isQueued: false,
+      queuePosition: 0,
+      totalQueued: startResult.totalQueued,
+      estimatedWaitSec: 0,
       ticket,
-      url: session.controller.getUrl(),
-      title: session.controller.getTitle(),
+      url: startResult.session!.controller.getUrl(),
+      title: startResult.session!.controller.getTitle(),
     });
   } catch (err: unknown) {
     if (err instanceof SSRFSecurityError) {
@@ -127,6 +150,24 @@ app.post('/session/start', async (c) => {
     console.error('[Session Start Error]', err);
     return c.json({ error: 'Failed to start browser session', message: msg }, 500);
   }
+});
+
+/**
+ * Concurrency Queue inspection endpoint
+ */
+app.get('/session/queue-status', (c) => {
+  const runId = c.req.query('runId');
+  if (runId) {
+    const queueInfo = BrowserSessionManager.getQueueStatus(runId);
+    return c.json({ success: true, ...queueInfo });
+  }
+
+  return c.json({
+    success: true,
+    activeSessions: BrowserSessionManager.getActiveCount(),
+    maxConcurrent: MAX_CONCURRENT_SESSIONS,
+    totalQueued: BrowserSessionManager.getQueueLength(),
+  });
 });
 
 /**
@@ -156,6 +197,21 @@ app.post('/session/action', async (c) => {
 
     const session = BrowserSessionManager.getSession(runId);
     if (!session || session.status === 'closed') {
+      const queueInfo = BrowserSessionManager.getQueueStatus(runId);
+      if (queueInfo.isQueued) {
+        return c.json(
+          {
+            error: 'Session Queued',
+            status: 'queued',
+            isQueued: true,
+            queuePosition: queueInfo.position,
+            totalQueued: queueInfo.totalQueued,
+            estimatedWaitSec: queueInfo.estimatedWaitSec,
+            message: `Session is waiting in queue (#${queueInfo.position} of ${queueInfo.totalQueued}). Action deferred until browser launches.`,
+          },
+          429
+        );
+      }
       return c.json({ error: 'Session not found or closed' }, 404);
     }
 
@@ -202,6 +258,9 @@ app.post('/session/action', async (c) => {
     } else if (action === 'inspect_dom') {
       const elements = await session.controller.inspectDom();
       result = { action: 'inspect_dom', elements, success: true };
+    } else if (action === 'discover_routes') {
+      const routes = await session.controller.discoverRoutes();
+      result = { action: 'discover_routes', routes, success: true };
     } else {
       return c.json({ error: `Unknown action: "${action}"` }, 400);
     }
@@ -218,6 +277,8 @@ app.post('/session/action', async (c) => {
       success: result.success !== false,
       action,
       result,
+      elements: result?.elements,
+      routes: result?.routes,
       diagnostics: session.controller.getDiagnostics(),
       currentUrl: session.controller.getUrl(),
       currentTitle: session.controller.getTitle(),

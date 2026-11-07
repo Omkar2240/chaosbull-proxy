@@ -77,6 +77,8 @@ export class PlaywrightBrowserController {
       viewport: this.viewport,
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 ChaosBull/1.0',
+      permissions: ['geolocation'],
+      geolocation: { latitude: 37.7749, longitude: -122.4194 },
     });
 
     this.page = await this.context.newPage();
@@ -206,30 +208,101 @@ export class PlaywrightBrowserController {
     }
   }
 
-  async inspectDom(): Promise<Array<{ tag: string; text: string; type?: string; placeholder?: string; selector: string }>> {
+  async inspectDom(): Promise<Array<{
+    tag: string;
+    text: string;
+    type?: string;
+    placeholder?: string;
+    selector: string;
+    disabled?: boolean;
+    ariaDisabled?: boolean;
+    contextText?: string;
+  }>> {
     this.ensureReady();
     try {
+      // Ensure SPA interactive elements have mounted
+      await this.page!.waitForSelector('button, a, input, select, textarea, [role="button"]', { timeout: 3500 }).catch(() => {});
       return await this.page!.evaluate(() => {
         const elements = Array.from(document.querySelectorAll('button, a, input, select, textarea, [role="button"]'));
-        return elements.slice(0, 40).map((el) => {
+        return elements.slice(0, 50).map((el) => {
           const tag = el.tagName.toLowerCase();
-          const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 50);
+          const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
           const type = (el as HTMLInputElement).type || undefined;
           const placeholder = (el as HTMLInputElement).placeholder || undefined;
           const name = (el as HTMLInputElement).name || undefined;
           const id = el.id ? `#${el.id}` : '';
+          const disabled = (el as HTMLButtonElement).disabled || false;
+          const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
+
+          // Look for nearby contextual helper text or descriptions (e.g. "Requires location access for local weather.", "Getting weather...")
+          let contextText = '';
+          const parent = el.closest('div, form, section, fieldset, label');
+          if (parent) {
+            const parentText = (parent.textContent || '').trim().replace(/\s+/g, ' ');
+            if (/location|weather|required|temperature|permission|gps|loading|error/i.test(parentText)) {
+              contextText = parentText.slice(0, 120);
+            }
+          }
 
           let selector = id;
           if (!selector) {
             if (name) selector = `${tag}[name="${name}"]`;
             else if (placeholder) selector = `${tag}[placeholder*="${placeholder.slice(0, 20)}"]`;
-            else if (text && tag === 'button') selector = `button:has-text("${text}")`;
+            else if (text && (tag === 'button' || el.getAttribute('role') === 'button')) selector = `button:has-text("${text}")`;
             else if (text && tag === 'a') selector = `a:has-text("${text}")`;
             else selector = tag;
           }
 
-          return { tag, text, type, placeholder, selector };
+          return { tag, text, type, placeholder, selector, disabled, ariaDisabled, contextText: contextText || undefined };
         });
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Discovers and extracts verified, real internal routes on the current website.
+   * Filters out external links, anchor jumps, asset files, and duplicates.
+   */
+  async discoverRoutes(): Promise<Array<{ url: string; path: string; text: string }>> {
+    this.ensureReady();
+    try {
+      // Ensure navigation links have rendered
+      await this.page!.waitForSelector('a[href], nav, header, button', { timeout: 3000 }).catch(() => {});
+      return await this.page!.evaluate(() => {
+        const origin = window.location.origin;
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        const seen = new Set<string>();
+        const results: Array<{ url: string; path: string; text: string }> = [];
+
+        for (const a of links) {
+          const href = (a as HTMLAnchorElement).href;
+          const text = (a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+
+          if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) {
+            continue;
+          }
+
+          try {
+            const parsed = new URL(href, origin);
+            // Only same-origin internal routes
+            if (parsed.origin !== origin) continue;
+
+            const path = parsed.pathname;
+            // Exclude empty or hash-only on root
+            if (!path || (path === window.location.pathname && parsed.hash)) continue;
+            // Exclude static assets
+            if (/\.(png|jpe?g|gif|svg|webp|ico|pdf|zip|tar|gz|css|js|map|txt|xml|json)$/i.test(path)) continue;
+
+            const cleanUrl = `${origin}${path}`;
+            if (!seen.has(cleanUrl)) {
+              seen.add(cleanUrl);
+              results.push({ url: cleanUrl, path, text: text || path });
+            }
+          } catch {}
+        }
+        return results.slice(0, 15);
       });
     } catch {
       return [];
@@ -242,6 +315,8 @@ export class PlaywrightBrowserController {
     const start = Date.now();
     try {
       await this.page!.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Allow client-side React / Next.js / Vite SPA hydration to mount interactive elements
+      await this.page!.waitForSelector('button, a, input, [role="button"], form', { timeout: 4000 }).catch(() => {});
       this.currentUrl = this.page!.url();
       this.currentTitle = (await this.page!.title().catch(() => '')) || url;
       console.log(`[BrowserController] Navigation complete in ${Date.now() - start}ms. Title: "${this.currentTitle}"`);
@@ -366,8 +441,23 @@ export class PlaywrightBrowserController {
     const start = Date.now();
     try {
       if (selector) {
-        await this.highlightElement(selector, '#059669');
-        await this.page!.click(selector, { timeout: 10000 });
+        let locator = this.page!.locator(selector).first();
+        let count = await locator.count().catch(() => 0);
+
+        if (count === 0) {
+          // Fallback to common submit buttons
+          locator = this.page!.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Send"), button:has-text("Sign"), button:has-text("Register")').first();
+          count = await locator.count().catch(() => 0);
+        }
+
+        if (count > 0) {
+          await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+          await this.highlightElement(selector, '#059669');
+          await locator.click({ timeout: 5000 });
+        } else {
+          // If no submit button found, press Enter to submit active form
+          await this.page!.keyboard.press('Enter');
+        }
       } else {
         await this.page!.keyboard.press('Enter');
       }
@@ -515,7 +605,7 @@ export class PlaywrightBrowserController {
   async clearChaos(): Promise<void> {
     if (!this.page) return;
     try {
-      await this.page.unrouteAll({ behavior: 'wait' }).catch(() => {});
+      await this.page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
     } catch {}
   }
 

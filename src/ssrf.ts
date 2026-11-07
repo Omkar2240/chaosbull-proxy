@@ -93,6 +93,11 @@ export class SSRFSecurityError extends Error {
  * - Resolves DNS and verifies all resolved IP addresses are public
  */
 export async function validateTargetUrl(targetUrl: string, allowLocal: boolean = false): Promise<void> {
+  // Allow safe blank page for browser context initialization
+  if (targetUrl === 'about:blank' || !targetUrl) {
+    return;
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(targetUrl);

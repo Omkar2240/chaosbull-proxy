@@ -1,7 +1,7 @@
 {
-  "name": "proxy",
+  "name": "chaosbull-proxy",
   "version": "1.0.0",
-  "description": "",
+  "description": "ChaosBull Remote Headless Browser & MCP Proxy Execution Server",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -14,16 +14,14 @@
   "license": "ISC",
   "dependencies": {
     "@hono/node-server": "^2.1.4",
-    "@types/ws": "^8.18.2",
-    "hono": "^4.13.13",
-    "ws": "^8.22.1"
-  },
-  "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
     "dotenv": "^18.0.9",
+    "hono": "^4.13.13",
     "playwright": "^1.64.1",
     "tsx": "^4.23.15",
+    "ws": "^8.22.1",
     "zod": "^4.6.7"
   }
 }
